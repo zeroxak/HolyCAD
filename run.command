@@ -4,7 +4,8 @@ set -euo pipefail
 APP_DIR="${0:A:h}"
 PROJECT_DIR="${APP_DIR:h}"
 ISO_PATH="${TEMPLEOS_ISO:-${PROJECT_DIR}/TempleOS.ISO}"
-DISK_PATH="${APP_DIR}/HolyCADShare.img"
+SOURCE_DISK_PATH="${APP_DIR}/HolyCADShare.img"
+PROJECT_DISK_PATH="${APP_DIR}/HolyCADProjects.img"
 DISK_SIZE=67108864
 TEMP_DISK_PATH=""
 
@@ -34,42 +35,63 @@ if [[ ! -f "$ISO_PATH" ]]; then
   exit 1
 fi
 
-if [[ -f "$DISK_PATH" ]]; then
-  ACTUAL_DISK_SIZE="$(stat -f '%z' "$DISK_PATH")"
-  if [[ "$ACTUAL_DISK_SIZE" -ne "$DISK_SIZE" ]]; then
-    print -u2 "HolyCAD transfer image has the wrong size: ${ACTUAL_DISK_SIZE} bytes"
-    print -u2 "Expected ${DISK_SIZE} bytes. Move or remove the invalid image manually."
-    exit 1
-  fi
-else
-  if [[ -f "${DISK_PATH}.gz" ]]; then
-    print "Unpacking HolyCADShare.img.gz..."
-    TEMP_DISK_PATH="$(mktemp "${DISK_PATH}.tmp.XXXXXX")"
-    gzip -dc "${DISK_PATH}.gz" > "$TEMP_DISK_PATH"
-    ACTUAL_DISK_SIZE="$(stat -f '%z' "$TEMP_DISK_PATH")"
-    if [[ "$ACTUAL_DISK_SIZE" -ne "$DISK_SIZE" ]]; then
-      print -u2 "Unpacked image has the wrong size: ${ACTUAL_DISK_SIZE} bytes"
-      print -u2 "Expected ${DISK_SIZE} bytes. The temporary image will be removed."
-      exit 1
-    fi
-    mv -n "$TEMP_DISK_PATH" "$DISK_PATH"
-    if [[ -f "$TEMP_DISK_PATH" ]]; then
-      print -u2 "HolyCADShare.img appeared while unpacking; it was not overwritten."
-      exit 1
-    fi
-    TEMP_DISK_PATH=""
-  else
-    print -u2 "HolyCAD transfer image not found: $DISK_PATH"
-    exit 1
-  fi
-fi
+ensure_disk_image() {
+  local disk_path="$1"
+  local disk_label="$2"
+  local refresh_from_bundle="$3"
+  local compressed_path="${disk_path}.gz"
+  local actual_size
 
-ACTUAL_DISK_SIZE="$(stat -f '%z' "$DISK_PATH")"
-if [[ "$ACTUAL_DISK_SIZE" -ne "$DISK_SIZE" ]]; then
-  print -u2 "HolyCAD transfer image has the wrong size: ${ACTUAL_DISK_SIZE} bytes"
-  print -u2 "Expected ${DISK_SIZE} bytes."
-  exit 1
-fi
+  if [[ -f "$disk_path" ]]; then
+    actual_size="$(stat -f '%z' "$disk_path")"
+    if [[ "$actual_size" -ne "$DISK_SIZE" &&
+          "$refresh_from_bundle" != "yes" ]]; then
+      print -u2 "${disk_label} has the wrong size: ${actual_size} bytes"
+      print -u2 "Expected ${DISK_SIZE} bytes. Move or remove the invalid image manually."
+      exit 1
+    fi
+    if [[ "$refresh_from_bundle" != "yes" ]]; then
+      return
+    fi
+  fi
+
+  if [[ ! -f "$compressed_path" ]]; then
+    print -u2 "${disk_label} was not found: ${compressed_path}"
+    exit 1
+  fi
+
+  TEMP_DISK_PATH="$(mktemp "${disk_path}.tmp.XXXXXX")"
+  gzip -dc "$compressed_path" > "$TEMP_DISK_PATH"
+  actual_size="$(stat -f '%z' "$TEMP_DISK_PATH")"
+  if [[ "$actual_size" -ne "$DISK_SIZE" ]]; then
+    print -u2 "Unpacked image has the wrong size: ${actual_size} bytes"
+    print -u2 "Expected ${DISK_SIZE} bytes. The temporary image will be removed."
+    exit 1
+  fi
+
+  if [[ "$refresh_from_bundle" == "yes" && -f "$disk_path" ]]; then
+    if cmp -s "$TEMP_DISK_PATH" "$disk_path"; then
+      rm -f -- "$TEMP_DISK_PATH"
+      TEMP_DISK_PATH=""
+      return
+    fi
+    print "Refreshing ${disk_path:t}..."
+    mv -f "$TEMP_DISK_PATH" "$disk_path"
+    TEMP_DISK_PATH=""
+    return
+  fi
+
+  print "Unpacking ${compressed_path:t}..."
+  mv -n "$TEMP_DISK_PATH" "$disk_path"
+  if [[ -f "$TEMP_DISK_PATH" ]]; then
+    print -u2 "${disk_path:t} appeared while unpacking; it was not overwritten."
+    exit 1
+  fi
+  TEMP_DISK_PATH=""
+}
+
+ensure_disk_image "$SOURCE_DISK_PATH" "HolyCAD source disk" "yes"
+ensure_disk_image "$PROJECT_DISK_PATH" "HolyCAD project disk" "no"
 
 exec "$QEMU_BIN" \
   -name HolyCAD \
@@ -78,7 +100,8 @@ exec "$QEMU_BIN" \
   -smp 1 \
   -m 512 \
   -boot order=d \
-  -drive "file.filename=${DISK_PATH},file.locking=off,if=ide,index=0,format=raw" \
+  -drive "file.filename=${SOURCE_DISK_PATH},file.locking=off,if=ide,index=0,format=raw" \
+  -drive "file.filename=${PROJECT_DISK_PATH},file.locking=off,if=ide,index=1,format=raw" \
   -drive "file.filename=${ISO_PATH},file.locking=off,if=ide,index=2,media=cdrom,readonly=on,format=raw" \
   -vga std \
   -display cocoa \

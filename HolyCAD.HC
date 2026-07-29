@@ -5,10 +5,14 @@
 #define HCAD_MAX_EDGES      2304
 #define HCAD_EXPORT_BYTES (1024*1024)
 #define HCAD_EXPORT_GUARD   2048
+#define HCAD_PROJECT_SLOTS     3
+#define HCAD_PROJECT_VERSION   2
+#define HCAD_PROJECT_MAGIC 0x4843414450524A31
 
 #define HCAD_TYPE_BOX         1
 #define HCAD_TYPE_CYLINDER    2
 #define HCAD_TYPE_IMPORTED    3
+#define HCAD_TYPE_CROSS       4
 
 #define HCAD_MODE_OBJECT      1
 #define HCAD_MODE_EDIT        2
@@ -19,6 +23,10 @@
 
 #define HCAD_VIEW_WIRE        1
 #define HCAD_VIEW_SHADED      2
+
+#define HCAD_PAGE_HOME        1
+#define HCAD_PAGE_HELP        2
+#define HCAD_PAGE_EDITOR      3
 
 #define HCAD_VIEW_LEFT        0
 #define HCAD_VIEW_RIGHT     640
@@ -40,6 +48,11 @@
 #define HCAD_EXPORT_WIDTH   230
 #define HCAD_EXPORT_BOTTOM  190
 
+#define HCAD_FILE_LEFT      170
+#define HCAD_FILE_TOP        44
+#define HCAD_FILE_WIDTH     300
+#define HCAD_FILE_BOTTOM    326
+
 #define HCAD_PI 3.141592653589793
 
 class HCadVec
@@ -57,6 +70,22 @@ class HCadEdge
   I64 v[2];
 };
 
+class HCadProject
+{
+  I64 magic;
+  I64 version;
+  I64 tri_count;
+  I64 type;
+  I64 serial;
+  U64 checksum;
+  I64 view_mode;
+  I64 selected_dim;
+  F64 yaw,pitch,zoom;
+  F64 view_off_x,view_off_y;
+  F64 pivot_x,pivot_y,pivot_z;
+  U8 name[32];
+};
+
 HCadTri cad_tris[HCAD_MAX_TRIS];
 HCadVec cad_vertices[HCAD_MAX_VERTS];
 HCadEdge cad_edges[HCAD_MAX_EDGES];
@@ -66,7 +95,8 @@ F64 cad_face_depth[HCAD_MAX_TRIS];
 I64 cad_tri_count;
 I64 cad_vertex_count,cad_edge_count;
 
-I64 cad_type,cad_mode,cad_selected_dim,cad_view_mode;
+I64 cad_type,cad_mode,cad_selected_dim,cad_view_mode,cad_page;
+I64 cad_help_return;
 I64 cad_select_mode,cad_selected;
 I64 cad_selection_count;
 I64 cad_cylinder_sides;
@@ -77,10 +107,17 @@ F64 cad_yaw,cad_pitch,cad_zoom,cad_view_off_x,cad_view_off_y;
 F64 cad_pivot_x,cad_pivot_y,cad_pivot_z;
 Bool cad_quit,cad_dragging,cad_drag_moved,cad_prev_lb;
 Bool cad_show_gizmo,cad_object_selected;
-Bool cad_tools_open,cad_props_open,cad_export_open;
+Bool cad_tools_open,cad_props_open,cad_export_open,cad_file_open;
 Bool cad_multi_select,cad_component_selected[HCAD_MAX_VERTS];
+Bool cad_project_active,cad_project_dirty,cad_project_drive_ready;
+Bool cad_recent_available[HCAD_PROJECT_SLOTS];
+I64 cad_project_slot,cad_recent_order[HCAD_PROJECT_SLOTS];
+I64 cad_recent_copy[HCAD_PROJECT_SLOTS];
+I64 cad_recent_tris[HCAD_PROJECT_SLOTS];
+I64 cad_recent_serial[HCAD_PROJECT_SLOTS];
 I64 cad_drag_x,cad_drag_y,cad_drag_start_x,cad_drag_start_y;
 U8 cad_name[32],cad_status[120];
+U8 cad_recent_name[HCAD_PROJECT_SLOTS][32];
 
 U0 CadStatus(U8 *st)
 {
@@ -187,6 +224,43 @@ Bool CadSelectComponent(I64 index)
   }
   cad_selected=index;
   return TRUE;
+}
+
+U0 CadStepSelection(I64 delta)
+{
+  I64 index,limit;
+
+  if (cad_mode!=HCAD_MODE_EDIT) {
+    CadStatus("[ / ] component cycling is for Edit Mode");
+    return;
+  }
+  limit=CadSelectionLimit;
+  if (!limit)
+    return;
+
+  index=cad_selected;
+  if (index<0) {
+    if (delta<0)
+      index=limit-1;
+    else
+      index=0;
+  } else {
+    index+=delta;
+    if (index<0)
+      index=limit-1;
+    else if (index>=limit)
+      index=0;
+  }
+
+  if (!cad_multi_select)
+    CadClearSelection;
+  if (!cad_component_selected[index]) {
+    cad_component_selected[index]=TRUE;
+    cad_selection_count++;
+  }
+  cad_selected=index;
+  StrPrint(cad_status,"%s %d selected - [ / ] cycles",
+    CadSelectName,index+1);
 }
 
 Bool CadVecSame(HCadVec *a,HCadVec *b)
@@ -366,6 +440,71 @@ U0 CadBuildCylinder()
   CadStatus("Cylinder rebuilt from dimensions");
 }
 
+U0 CadCrossCapRect(F64 x0,F64 x1,F64 z0,F64 z1,
+                   F64 y,Bool back)
+{
+  if (!back) {
+    CadAddTri(x0,y,z0, x1,y,z0, x1,y,z1);
+    CadAddTri(x0,y,z0, x1,y,z1, x0,y,z1);
+  } else {
+    CadAddTri(x0,y,z0, x1,y,z1, x1,y,z0);
+    CadAddTri(x0,y,z0, x0,y,z1, x1,y,z1);
+  }
+}
+
+U0 CadBuildCross()
+{
+  I64 i,j;
+  F64 px[12],pz[12];
+  F64 outer=cad_width/2.0;
+  F64 bar=cad_width/6.0;
+  F64 depth=cad_depth/2.0;
+  F64 height=cad_height;
+  F64 arm_lo=height*17.0/30.0;
+  F64 arm_hi=height*4.0/5.0;
+
+  cad_tri_count=0;
+
+  CadCrossCapRect(-bar,bar,0,arm_lo,-depth,FALSE);
+  CadCrossCapRect(-outer,-bar,arm_lo,arm_hi,-depth,FALSE);
+  CadCrossCapRect(-bar,bar,arm_lo,arm_hi,-depth,FALSE);
+  CadCrossCapRect(bar,outer,arm_lo,arm_hi,-depth,FALSE);
+  CadCrossCapRect(-bar,bar,arm_hi,height,-depth,FALSE);
+
+  CadCrossCapRect(-bar,bar,0,arm_lo,depth,TRUE);
+  CadCrossCapRect(-outer,-bar,arm_lo,arm_hi,depth,TRUE);
+  CadCrossCapRect(-bar,bar,arm_lo,arm_hi,depth,TRUE);
+  CadCrossCapRect(bar,outer,arm_lo,arm_hi,depth,TRUE);
+  CadCrossCapRect(-bar,bar,arm_hi,height,depth,TRUE);
+
+  px[0]=-bar;    pz[0]=0;
+  px[1]= bar;    pz[1]=0;
+  px[2]= bar;    pz[2]=arm_lo;
+  px[3]= outer;  pz[3]=arm_lo;
+  px[4]= outer;  pz[4]=arm_hi;
+  px[5]= bar;    pz[5]=arm_hi;
+  px[6]= bar;    pz[6]=height;
+  px[7]=-bar;    pz[7]=height;
+  px[8]=-bar;    pz[8]=arm_hi;
+  px[9]=-outer;  pz[9]=arm_hi;
+  px[10]=-outer; pz[10]=arm_lo;
+  px[11]=-bar;   pz[11]=arm_lo;
+
+  for (i=0;i<12;i++) {
+    j=(i+1)%12;
+    CadAddTri(px[i],-depth,pz[i],
+              px[i], depth,pz[i],
+              px[j], depth,pz[j]);
+    CadAddTri(px[i],-depth,pz[i],
+              px[j], depth,pz[j],
+              px[j],-depth,pz[j]);
+  }
+
+  CadBounds;
+  StrCpy(cad_name,"HOLY CROSS");
+  CadStatus("Holy Cross created");
+}
+
 U0 CadFitView()
 {
   F64 sx=cad_max_x-cad_min_x;
@@ -389,6 +528,8 @@ U0 CadRebuild()
     CadBuildBox;
   else if (cad_type==HCAD_TYPE_CYLINDER)
     CadBuildCylinder;
+  else if (cad_type==HCAD_TYPE_CROSS)
+    CadBuildCross;
   CadBuildTopology;
   CadFitView;
 }
@@ -400,7 +541,7 @@ Bool CadLoadSTL(U8 *filename)
   I64 loaded_count=0,vi=0;
   F64 x,y,z;
 
-  if (!(buf=FileRead(filename))) {
+  if (!FileFind(filename) || !(buf=FileRead(filename))) {
     CadStatus("Could not open ASCII STL");
     return FALSE;
   }
@@ -443,6 +584,8 @@ Bool CadLoadSTL(U8 *filename)
   cad_mode=HCAD_MODE_OBJECT;
   cad_object_selected=TRUE;
   cad_selected=-1;
+  cad_project_active=TRUE;
+  cad_project_dirty=TRUE;
   CadStatus("ASCII STL loaded and centered");
   return TRUE;
 }
@@ -813,51 +956,250 @@ U0 CadDrawMesh(CDC *dc)
 
 U0 CadButton(CDC *dc,I64 x,I64 y,I64 w,I64 h,U8 *label,Bool active=FALSE)
 {
-  if (active)
-    dc->color=LTRED;
-  else
-    dc->color=BLUE;
+  dc->color=BLUE;
   GrRect(dc,x,y,w,h);
-  dc->color=WHITE;
+  if (active)
+    dc->color=RED;
+  else
+    dc->color=LTGRAY;
+  GrRect(dc,x+2,y+2,w-4,h-4);
+  if (active)
+    dc->color=WHITE;
+  else
+    dc->color=BLACK;
   GrPrint(dc,x+(w-StrLen(label)*FONT_WIDTH)/2,
     y+(h-FONT_HEIGHT)/2,"%s",label);
 }
 
 U0 CadPanelBack(CDC *dc,I64 x,I64 y,I64 w,I64 h)
 {
-  dc->color=LTRED;
+  dc->color=BLUE;
   GrRect(dc,x-2,y-2,w+4,h+4);
-  dc->color=YELLOW;
+  dc->color=WHITE;
   GrRect(dc,x,y,w,h);
+}
+
+U0 CadLogoPattern(U8 ch,U8 *p)
+{
+  MemSet(p,0,7);
+  switch (ch) {
+    case 'H':
+      p[0]=17;p[1]=17;p[2]=17;p[3]=31;
+      p[4]=17;p[5]=17;p[6]=17;
+      break;
+    case 'O':
+      p[0]=14;p[1]=17;p[2]=17;p[3]=17;
+      p[4]=17;p[5]=17;p[6]=14;
+      break;
+    case 'L':
+      p[0]=16;p[1]=16;p[2]=16;p[3]=16;
+      p[4]=16;p[5]=16;p[6]=31;
+      break;
+    case 'Y':
+      p[0]=17;p[1]=17;p[2]=10;p[3]=4;
+      p[4]=4;p[5]=4;p[6]=4;
+      break;
+    case 'C':
+      p[0]=14;p[1]=17;p[2]=16;p[3]=16;
+      p[4]=16;p[5]=17;p[6]=14;
+      break;
+    case 'A':
+      p[0]=14;p[1]=17;p[2]=17;p[3]=31;
+      p[4]=17;p[5]=17;p[6]=17;
+      break;
+    case 'D':
+      p[0]=30;p[1]=17;p[2]=17;p[3]=17;
+      p[4]=17;p[5]=17;p[6]=30;
+      break;
+  }
+}
+
+U0 CadDrawLogoWord(CDC *dc,I64 x,I64 y,I64 scale)
+{
+  U8 *word="HOLYCAD";
+  U8 p[7];
+  I64 i,row,col;
+
+  for (i=0;word[i];i++) {
+    CadLogoPattern(word[i],p);
+    if (i<4)
+      dc->color=BLUE;
+    else
+      dc->color=RED;
+    for (row=0;row<7;row++)
+      for (col=0;col<5;col++)
+        if (p[row] & 1<<(4-col))
+          GrRect(dc,x+i*scale*6+col*scale,
+            y+row*scale,scale,scale);
+  }
+}
+
+U0 CadDrawCrossMark(CDC *dc,I64 x,I64 y)
+{
+  dc->color=BLUE;
+  GrRect(dc,x+19,y+3,22,64);
+  GrRect(dc,x+3,y+22,54,25);
+  dc->color=RED;
+  GrRect(dc,x+16,y,22,64);
+  GrRect(dc,x,y+19,54,25);
+  dc->color=YELLOW;
+  GrRect(dc,x+21,y+5,12,54);
+  GrRect(dc,x+5,y+24,44,15);
+}
+
+U0 CadDrawHome(CTask *task,CDC *dc)
+{
+  U8 label[96];
+  I64 i,slot;
+
+  dc->color=WHITE;
+  GrRect(dc,0,0,task->pix_width,task->pix_height);
+  dc->color=BLUE;
+  GrRect(dc,0,0,task->pix_width,28);
+  GrRect(dc,0,task->pix_height-28,task->pix_width,28);
+  dc->color=YELLOW;
+  GrPrint(dc,8,6,"HOLYCAD HOME");
+  GrPrint(dc,task->pix_width-48,6,"V0.4");
+
+  CadDrawCrossMark(dc,182,38);
+  CadDrawLogoWord(dc,245,61,5);
+  dc->color=DKGRAY;
+  GrPrint(dc,196,107,"3D MESH WORKSHOP FOR TEMPLEOS");
+
+  CadButton(dc,176,132,288,34,"N  START NEW PROJECT",TRUE);
+  if (cad_project_active)
+    CadButton(dc,176,172,288,30,"C  CONTINUE CURRENT");
+
+  CadPanelBack(dc,120,214,400,142);
+  dc->color=RED;
+  GrPrint(dc,136,224,"OPEN RECENT");
+  dc->color=DKGRAY;
+  GrPrint(dc,352,224,"PERSISTENT D:");
+  for (i=0;i<HCAD_PROJECT_SLOTS;i++) {
+    slot=cad_recent_order[i];
+    if (cad_recent_available[slot]) {
+      StrPrint(label,"%d  %20ts  %d FACES",
+        i+1,cad_recent_name[slot],cad_recent_tris[slot]);
+      CadButton(dc,136,244+i*34,368,26,label,i==0);
+    } else {
+      StrPrint(label,"%d  -- EMPTY PROJECT SLOT --",i+1);
+      CadButton(dc,136,244+i*34,368,26,label);
+    }
+  }
+
+  CadButton(dc,176,370,136,34,"?  HELP");
+  CadButton(dc,328,370,136,34,"ESC  EXIT");
+  dc->color=DKGRAY;
+  if (cad_project_drive_ready)
+    GrPrint(dc,132,418,"SAVES: D:/HOLYCAD  |  TEMPLEOS PROJECT DISK");
+  else {
+    dc->color=RED;
+    GrPrint(dc,124,418,"PROJECT DISK NOT READY - CHECK LAUNCHER");
+  }
+
+  dc->color=WHITE;
+  GrPrint(dc,8,task->pix_height-20,
+    "N NEW | C CONTINUE | 1-3 OPEN | ? HELP | ESC EXIT");
+}
+
+U0 CadDrawHelp(CTask *task,CDC *dc)
+{
+  dc->color=WHITE;
+  GrRect(dc,0,0,task->pix_width,task->pix_height);
+  dc->color=BLUE;
+  GrRect(dc,0,0,task->pix_width,28);
+  GrRect(dc,0,task->pix_height-28,task->pix_width,28);
+  dc->color=YELLOW;
+  GrPrint(dc,8,6,"HOLYCAD HELP");
+  GrPrint(dc,task->pix_width-48,6,"V0.4");
+
+  CadPanelBack(dc,18,40,604,374);
+  dc->color=RED;
+  GrPrint(dc,36,54,"BASICS");
+  dc->color=DKGRAY;
+  GrPrint(dc,36,72,"K         New Holy Cross");
+  GrPrint(dc,36,88,"Drag      Orbit camera");
+  GrPrint(dc,36,104,"WASD      Orbit camera");
+  GrPrint(dc,36,120,"Arrows    Orbit camera");
+  GrPrint(dc,36,136,"+ / -     Zoom");
+  GrPrint(dc,36,152,"R         Frame mesh");
+  GrPrint(dc,36,168,"M         Shaded / wire");
+
+  dc->color=RED;
+  GrPrint(dc,36,198,"FILES");
+  dc->color=DKGRAY;
+  GrPrint(dc,36,216,"Ctrl-S    Quick save");
+  GrPrint(dc,36,232,"F         File / save slots");
+  GrPrint(dc,36,248,"O         Import HolyGem.STL");
+  GrPrint(dc,36,264,"P         Export STL / OBJ");
+  GrPrint(dc,36,280,"H / Esc   Home");
+  GrPrint(dc,36,296,"Saves persist on D:");
+
+  dc->color=RED;
+  GrPrint(dc,328,54,"SELECT + MOVE");
+  dc->color=DKGRAY;
+  GrPrint(dc,328,72,"Tab       Object / Edit");
+  GrPrint(dc,328,88,"1 / 2 / 3 Vertex / Edge / Face");
+  GrPrint(dc,328,104,"Click     Select component");
+  GrPrint(dc,328,120,"Q         Multi-select");
+  GrPrint(dc,328,136,"X / Y / Z Movement axis");
+  GrPrint(dc,328,152,", / .     Move -/+ 1 mm");
+  GrPrint(dc,328,168,"[ / ]     Cycle / add component");
+  GrPrint(dc,328,184,"Selected parts move together");
+
+  dc->color=RED;
+  GrPrint(dc,328,198,"PANELS");
+  dc->color=DKGRAY;
+  GrPrint(dc,328,216,"T         Tools overlay");
+  GrPrint(dc,328,232,"N         Inspector overlay");
+  GrPrint(dc,328,248,"G         Toggle gizmo");
+  GrPrint(dc,328,264,"Object Mode moves all");
+  GrPrint(dc,328,280,"Edit Mode exposes topology");
+
+  dc->color=BLUE;
+  GrRect(dc,74,326,492,54);
+  dc->color=YELLOW;
+  GrPrint(dc,94,338,"MOVE A VERTEX");
+  dc->color=WHITE;
+  GrPrint(dc,94,354,"TAB > 1 > CLICK > X/Y/Z > , OR .");
+
+  CadButton(dc,224,386,192,24,"ESC  BACK");
+  dc->color=WHITE;
+  GrPrint(dc,8,task->pix_height-20,
+    "Q ON: CLICK TO ADD/REMOVE, THEN MOVE TOGETHER");
 }
 
 U0 CadDrawHeader(CTask *task,CDC *dc)
 {
-  dc->color=RED;
+  dc->color=BLUE;
   GrRect(dc,0,0,task->pix_width,28);
   dc->color=YELLOW;
   GrPrint(dc,8,6,"HOLYCAD");
 
-  CadButton(dc,70,3,50,22,"FILE",cad_export_open);
-  CadButton(dc,124,3,66,22,CadModeName,TRUE);
+  CadButton(dc,70,3,46,22,"FILE",
+    cad_file_open || cad_export_open);
+  CadButton(dc,120,3,66,22,CadModeName,TRUE);
   if (cad_mode==HCAD_MODE_EDIT) {
-    CadButton(dc,194,3,30,22,"1V",
+    CadButton(dc,190,3,28,22,"1V",
       cad_select_mode==HCAD_SELECT_VERTEX);
-    CadButton(dc,228,3,30,22,"2E",
+    CadButton(dc,222,3,28,22,"2E",
       cad_select_mode==HCAD_SELECT_EDGE);
-    CadButton(dc,262,3,30,22,"3F",
+    CadButton(dc,254,3,28,22,"3F",
       cad_select_mode==HCAD_SELECT_FACE);
-    CadButton(dc,296,3,70,22,"Q MULTI",cad_multi_select);
+    CadButton(dc,286,3,66,22,"Q MULTI",cad_multi_select);
   }
   if (cad_view_mode==HCAD_VIEW_WIRE)
-    CadButton(dc,370,3,72,22,"M WIRE",TRUE);
+    CadButton(dc,356,3,68,22,"M WIRE",TRUE);
   else
-    CadButton(dc,370,3,72,22,"M SOLID",TRUE);
+    CadButton(dc,356,3,68,22,"M SOLID",TRUE);
 
   dc->color=YELLOW;
-  GrPrint(dc,448,6,"V0.3");
-  CadButton(dc,484,3,68,22,"T TOOLS",cad_tools_open);
-  CadButton(dc,556,3,80,22,"N PANEL",cad_props_open);
+  if (cad_project_dirty)
+    GrPrint(dc,430,6,"V0.4*");
+  else
+    GrPrint(dc,430,6,"V0.4");
+  CadButton(dc,474,3,76,22,"T TOOLS",cad_tools_open);
+  CadButton(dc,554,3,82,22,"N INFO",cad_props_open);
 }
 
 U0 CadDrawTools(CDC *dc)
@@ -871,42 +1213,44 @@ U0 CadDrawTools(CDC *dc)
   GrPrint(dc,16,48,"MESH TOOLS");
 
   dc->color=DKGRAY;
-  GrPrint(dc,16,69,"MODE");
-  CadButton(dc,15,84,98,21,"TAB OBJECT",
+  GrPrint(dc,16,66,"MODE");
+  CadButton(dc,15,80,98,19,"TAB OBJECT",
     cad_mode==HCAD_MODE_OBJECT);
-  CadButton(dc,15,109,98,21,"TAB EDIT",
+  CadButton(dc,15,103,98,19,"TAB EDIT",
     cad_mode==HCAD_MODE_EDIT);
 
   dc->color=DKGRAY;
-  GrPrint(dc,16,139,"SELECT");
-  CadButton(dc,15,154,98,21,"1  VERTEX",
+  GrPrint(dc,16,132,"SELECT");
+  CadButton(dc,15,146,98,19,"1  VERTEX",
     cad_mode==HCAD_MODE_EDIT &&
     cad_select_mode==HCAD_SELECT_VERTEX);
-  CadButton(dc,15,179,98,21,"2  EDGE",
+  CadButton(dc,15,169,98,19,"2  EDGE",
     cad_mode==HCAD_MODE_EDIT &&
     cad_select_mode==HCAD_SELECT_EDGE);
-  CadButton(dc,15,204,98,21,"3  FACE",
+  CadButton(dc,15,192,98,19,"3  FACE",
     cad_mode==HCAD_MODE_EDIT &&
     cad_select_mode==HCAD_SELECT_FACE);
-  CadButton(dc,15,229,98,21,"Q  MULTI",
+  CadButton(dc,15,215,98,19,"Q  MULTI",
     cad_mode==HCAD_MODE_EDIT && cad_multi_select);
 
-  dc->color=DKGRAY;
-  GrPrint(dc,16,259,"ADD / OPEN");
-  CadButton(dc,15,274,98,21,"B  BOX",cad_type==HCAD_TYPE_BOX);
-  CadButton(dc,15,299,98,21,"C  CYLINDER",
+  dc->color=RED;
+  GrPrint(dc,16,245,"GOD / MODELS");
+  CadButton(dc,15,259,98,19,"K  HOLY CROSS",
+    cad_type==HCAD_TYPE_CROSS);
+  CadButton(dc,15,282,98,19,"B  BOX",cad_type==HCAD_TYPE_BOX);
+  CadButton(dc,15,305,98,19,"C  CYLINDER",
     cad_type==HCAD_TYPE_CYLINDER);
-  CadButton(dc,15,324,98,21,"O  IMPORT",
+  CadButton(dc,15,328,98,19,"O  IMPORT",
     cad_type==HCAD_TYPE_IMPORTED);
 
   dc->color=DKGRAY;
-  GrPrint(dc,16,354,"VIEW / FILE");
+  GrPrint(dc,16,358,"VIEW / FILE");
   if (cad_view_mode==HCAD_VIEW_WIRE)
-    CadButton(dc,15,369,98,21,"M  WIRE",TRUE);
+    CadButton(dc,15,372,98,19,"M  WIRE",TRUE);
   else
-    CadButton(dc,15,369,98,21,"M  SHADED",TRUE);
-  CadButton(dc,15,394,98,21,"G  GIZMO",cad_show_gizmo);
-  CadButton(dc,15,419,98,21,"P  EXPORT",cad_export_open);
+    CadButton(dc,15,372,98,19,"M  SHADED",TRUE);
+  CadButton(dc,15,395,98,19,"G  GIZMO",cad_show_gizmo);
+  CadButton(dc,15,418,98,19,"F  FILE",cad_file_open);
 }
 
 U0 CadDrawProps(CDC *dc)
@@ -984,17 +1328,51 @@ U0 CadDrawExportMenu(CDC *dc)
   GrPrint(dc,217,169,"ESC OR OUTSIDE CLICK");
 }
 
+U0 CadDrawFileMenu(CDC *dc)
+{
+  U8 label[96];
+  I64 i;
+
+  if (!cad_file_open)
+    return;
+
+  CadPanelBack(dc,HCAD_FILE_LEFT,HCAD_FILE_TOP,
+    HCAD_FILE_WIDTH,HCAD_FILE_BOTTOM-HCAD_FILE_TOP);
+  dc->color=RED;
+  GrPrint(dc,184,54,"FILE / PROJECT");
+  dc->color=DKGRAY;
+  GrPrint(dc,348,54,"D: PROJECTS");
+
+  CadButton(dc,184,76,272,24,"CTRL-S  QUICK SAVE",
+    !cad_project_dirty && cad_project_slot);
+  for (i=0;i<HCAD_PROJECT_SLOTS;i++) {
+    if (cad_recent_available[i])
+      StrPrint(label,"%d  SAVE SLOT %d  %14ts",
+        i+1,i+1,cad_recent_name[i]);
+    else
+      StrPrint(label,"%d  SAVE SLOT %d  [EMPTY]",i+1,i+1);
+    CadButton(dc,184,106+i*30,272,24,label,
+      cad_project_slot==i+1);
+  }
+  CadButton(dc,184,202,272,24,"P  EXPORT MESH");
+  CadButton(dc,184,232,272,24,"H  HOME");
+  CadButton(dc,184,262,272,24,"?  HELP");
+  dc->color=DKGRAY;
+  GrPrint(dc,184,296,"ESC CLOSES THIS MENU");
+}
+
 U0 CadDrawPanels(CTask *task,CDC *dc)
 {
   CadDrawHeader(task,dc);
   CadDrawTools(dc);
   CadDrawProps(dc);
+  CadDrawFileMenu(dc);
   CadDrawExportMenu(dc);
 
-  dc->color=RED;
+  dc->color=BLUE;
   GrRect(dc,0,task->pix_height-28,task->pix_width,28);
   dc->color=WHITE;
-  GrPrint(dc,8,task->pix_height-20,"%.44s",cad_status);
+  GrPrint(dc,8,task->pix_height-20,"%-44ts",cad_status);
   dc->color=YELLOW;
   if (cad_mode==HCAD_MODE_EDIT)
     GrPrint(dc,task->pix_width-FONT_WIDTH*31-8,task->pix_height-20,
@@ -1006,6 +1384,15 @@ U0 CadDrawPanels(CTask *task,CDC *dc)
 
 U0 HolyCADDraw(CTask *task,CDC *dc)
 {
+  if (cad_page==HCAD_PAGE_HOME) {
+    CadDrawHome(task,dc);
+    return;
+  }
+  if (cad_page==HCAD_PAGE_HELP) {
+    CadDrawHelp(task,dc);
+    return;
+  }
+
   dc->color=BLACK;
   GrRect(dc,HCAD_VIEW_LEFT,HCAD_VIEW_TOP,
     HCAD_VIEW_RIGHT-HCAD_VIEW_LEFT,HCAD_VIEW_BOTTOM-HCAD_VIEW_TOP);
@@ -1027,6 +1414,8 @@ U0 CadSelectBox()
   cad_mode=HCAD_MODE_OBJECT;
   cad_object_selected=TRUE;
   cad_selected=-1;
+  cad_project_active=TRUE;
+  cad_project_dirty=TRUE;
 }
 
 U0 CadSelectCylinder()
@@ -1040,12 +1429,38 @@ U0 CadSelectCylinder()
   cad_mode=HCAD_MODE_OBJECT;
   cad_object_selected=TRUE;
   cad_selected=-1;
+  cad_project_active=TRUE;
+  cad_project_dirty=TRUE;
+}
+
+U0 CadSelectCross()
+{
+  cad_type=HCAD_TYPE_CROSS;
+  cad_width=42;
+  cad_depth=10;
+  cad_height=60;
+  cad_selected_dim=0;
+  CadRebuild;
+  cad_mode=HCAD_MODE_OBJECT;
+  cad_object_selected=TRUE;
+  cad_selected=-1;
+  cad_project_active=TRUE;
+  cad_project_dirty=TRUE;
+}
+
+U0 CadNewProject()
+{
+  cad_project_slot=0;
+  CadSelectCross;
+  cad_page=HCAD_PAGE_EDITOR;
+  CadStatus("New Holy Cross project - Ctrl-S saves");
 }
 
 U0 CadSetMode(I64 mode)
 {
   cad_mode=mode;
   cad_export_open=FALSE;
+  cad_file_open=FALSE;
   CadResetSelection;
   if (mode==HCAD_MODE_OBJECT) {
     cad_object_selected=TRUE;
@@ -1096,6 +1511,7 @@ U0 CadCycleView()
     cad_view_mode=HCAD_VIEW_SHADED;
   else
     cad_view_mode=HCAD_VIEW_WIRE;
+  cad_project_dirty=TRUE;
   StrPrint(cad_status,"%s viewport",CadViewName);
 }
 
@@ -1288,6 +1704,7 @@ U0 CadMoveSelection(F64 amount)
 
   CadSyncTopologyToMesh;
   CadBounds;
+  cad_project_dirty=TRUE;
   StrPrint(cad_status,"Moved %d %s components %.1f MM on %c",
     cad_selection_count,CadSelectName,amount,'X'+cad_selected_dim);
 }
@@ -1329,6 +1746,7 @@ U0 CadMoveObject(F64 amount)
   }
   CadSyncTopologyToMesh;
   CadBounds;
+  cad_project_dirty=TRUE;
   StrPrint(cad_status,"Moved object %.1f MM on %c",
     amount,'X'+cad_selected_dim);
 }
@@ -1350,6 +1768,385 @@ Bool CadExportPointOK(HCadVec *p)
 {
   return CadExportCoordOK(p->x) && CadExportCoordOK(p->y) &&
          CadExportCoordOK(p->z);
+}
+
+U0 CadProjectPath(U8 *path,I64 slot,I64 copy)
+{
+  StrPrint(path,"D:/HolyCAD/HCAD%d%C.HCP",slot,'A'+copy);
+}
+
+U8 *CadProjectReadSafe(U8 *path,I64 *size)
+{
+  U8 *buf=NULL;
+
+  *size=0;
+  if (!FileFind(path))
+    return NULL;
+  try {
+    buf=FileRead(path,size);
+  } catch {
+    Fs->catch_except=TRUE;
+    buf=NULL;
+    *size=0;
+  }
+  return buf;
+}
+
+I64 CadProjectWriteSafe(U8 *path,U8 *buf,I64 size)
+{
+  I64 wrote=0;
+
+  try {
+    wrote=FileWrite(path,buf,size);
+  } catch {
+    Fs->catch_except=TRUE;
+    wrote=0;
+  }
+  return wrote;
+}
+
+U0 CadProjectInvalidateSafe(U8 *path)
+{
+  U8 invalid=0;
+
+  CadProjectWriteSafe(path,&invalid,1);
+}
+
+Bool CadEnsureProjectDrive()
+{
+  CDrv *dv;
+
+  dv=Let2Drv('D',FALSE);
+  if (!dv) {
+    try {
+      ATAMount('D',BDT_ATA,0x1F0,0x3F4,1);
+    } catch {
+      Fs->catch_except=TRUE;
+      cad_project_drive_ready=FALSE;
+      return FALSE;
+    }
+    dv=Let2Drv('D',FALSE);
+  }
+
+  if (!dv || dv->fs_type!=FSt_FAT32) {
+    cad_project_drive_ready=FALSE;
+    return FALSE;
+  }
+
+  if (!FileFind("D:/HolyCAD",,FUF_JUST_DIRS) &&
+      !DirMk("D:/HolyCAD")) {
+    cad_project_drive_ready=FALSE;
+    return FALSE;
+  }
+  if (!FileFind("D:/HolyCAD",,FUF_JUST_DIRS)) {
+    cad_project_drive_ready=FALSE;
+    return FALSE;
+  }
+  cad_project_drive_ready=TRUE;
+  return TRUE;
+}
+
+U64 CadProjectChecksum(U8 *buf,I64 size)
+{
+  I64 i;
+  U64 hash=0x811C9DC5;
+
+  for (i=0;i<size;i++)
+    hash=(hash^buf[i])*16777619;
+  return hash;
+}
+
+Bool CadProjectHeaderOK(HCadProject *h,I64 size)
+{
+  I64 expected;
+  U64 checksum,stored;
+
+  if (size<sizeof(HCadProject))
+    return FALSE;
+  if (h->magic!=HCAD_PROJECT_MAGIC ||
+      h->version!=HCAD_PROJECT_VERSION)
+    return FALSE;
+  if (h->tri_count<1 || h->tri_count>HCAD_MAX_TRIS)
+    return FALSE;
+  expected=sizeof(HCadProject)+h->tri_count*sizeof(HCadTri);
+  if (size!=expected)
+    return FALSE;
+
+  stored=h->checksum;
+  h->checksum=0;
+  checksum=CadProjectChecksum(h,size);
+  h->checksum=stored;
+  return stored && checksum==stored;
+}
+
+Bool CadProjectTrisOK(HCadTri *tris,I64 count)
+{
+  I64 i,j;
+
+  for (i=0;i<count;i++)
+    for (j=0;j<3;j++)
+      if (!CadExportPointOK(&tris[i].p[j]))
+        return FALSE;
+  return TRUE;
+}
+
+U0 CadSortRecent()
+{
+  I64 i,j,tmp;
+
+  for (i=0;i<HCAD_PROJECT_SLOTS;i++)
+    cad_recent_order[i]=i;
+  for (i=0;i<HCAD_PROJECT_SLOTS-1;i++)
+    for (j=i+1;j<HCAD_PROJECT_SLOTS;j++)
+      if (cad_recent_serial[cad_recent_order[j]]>
+          cad_recent_serial[cad_recent_order[i]]) {
+        tmp=cad_recent_order[i];
+        cad_recent_order[i]=cad_recent_order[j];
+        cad_recent_order[j]=tmp;
+      }
+}
+
+U0 CadRefreshRecent()
+{
+  U8 path[64],*buf;
+  I64 i,copy,size;
+  HCadProject *h;
+  HCadTri *tris;
+
+  MemSet(cad_recent_available,0,sizeof(cad_recent_available));
+  MemSet(cad_recent_name,0,sizeof(cad_recent_name));
+  MemSet(cad_recent_tris,0,sizeof(cad_recent_tris));
+  MemSet(cad_recent_serial,0,sizeof(cad_recent_serial));
+  MemSet(cad_recent_copy,0xFF,sizeof(cad_recent_copy));
+  CadSortRecent;
+  if (!CadEnsureProjectDrive)
+    return;
+
+  for (i=0;i<HCAD_PROJECT_SLOTS;i++)
+    for (copy=0;copy<2;copy++) {
+      CadProjectPath(path,i+1,copy);
+      if (buf=CadProjectReadSafe(path,&size)) {
+        h=buf;
+        if (CadProjectHeaderOK(h,size)) {
+          tris=buf+sizeof(HCadProject);
+          if (CadProjectTrisOK(tris,h->tri_count) &&
+              (!cad_recent_available[i] ||
+               h->serial>cad_recent_serial[i])) {
+            h->name[31]=0;
+            cad_recent_available[i]=TRUE;
+            cad_recent_copy[i]=copy;
+            StrCpy(cad_recent_name[i],h->name);
+            cad_recent_tris[i]=h->tri_count;
+            cad_recent_serial[i]=h->serial;
+          }
+        }
+        Free(buf);
+      }
+    }
+
+  CadSortRecent;
+}
+
+Bool CadSaveProjectSlot(I64 slot)
+{
+  U8 path[64],*buf,*check;
+  I64 i,size,wrote,check_size,serial=1,target_copy=0;
+  HCadProject *h,*saved;
+  HCadTri *saved_tris;
+
+  if (slot<1 || slot>HCAD_PROJECT_SLOTS)
+    return FALSE;
+  if (!cad_project_active || !cad_tri_count) {
+    CadStatus("Start or open a project before saving");
+    return FALSE;
+  }
+  if (!CadEnsureProjectDrive) {
+    CadStatus("Persistent D: project disk is not mounted");
+    return FALSE;
+  }
+
+  CadSyncTopologyToMesh;
+  if (!CadProjectTrisOK(cad_tris,cad_tri_count)) {
+    CadStatus("Project save stopped - invalid mesh");
+    return FALSE;
+  }
+
+  for (i=0;i<HCAD_PROJECT_SLOTS;i++)
+    if (cad_recent_serial[i]>=serial)
+      serial=cad_recent_serial[i]+1;
+  if (cad_recent_available[slot-1] &&
+      0<=cad_recent_copy[slot-1]<=1)
+    target_copy=1-cad_recent_copy[slot-1];
+
+  size=sizeof(HCadProject)+cad_tri_count*sizeof(HCadTri);
+  buf=MAlloc(size);
+  MemSet(buf,0,size);
+  h=buf;
+  h->magic=HCAD_PROJECT_MAGIC;
+  h->version=HCAD_PROJECT_VERSION;
+  h->tri_count=cad_tri_count;
+  h->type=cad_type;
+  h->serial=serial;
+  h->view_mode=cad_view_mode;
+  h->selected_dim=cad_selected_dim;
+  h->yaw=cad_yaw;
+  h->pitch=cad_pitch;
+  h->zoom=cad_zoom;
+  h->view_off_x=cad_view_off_x;
+  h->view_off_y=cad_view_off_y;
+  h->pivot_x=cad_pivot_x;
+  h->pivot_y=cad_pivot_y;
+  h->pivot_z=cad_pivot_z;
+  StrCpy(h->name,cad_name);
+  MemCpy(buf+sizeof(HCadProject),cad_tris,
+    cad_tri_count*sizeof(HCadTri));
+  h->checksum=CadProjectChecksum(buf,size);
+
+  CadProjectPath(path,slot,target_copy);
+  wrote=CadProjectWriteSafe(path,buf,size);
+  if (!wrote) {
+    CadProjectInvalidateSafe(path);
+    Free(buf);
+    CadStatus("Project save failed");
+    return FALSE;
+  }
+
+  if (!(check=CadProjectReadSafe(path,&check_size))) {
+    CadProjectInvalidateSafe(path);
+    Free(buf);
+    CadStatus("Project save verification failed");
+    return FALSE;
+  }
+  saved=check;
+  saved_tris=check+sizeof(HCadProject);
+  if (!CadProjectHeaderOK(saved,check_size) ||
+      !CadProjectTrisOK(saved_tris,saved->tri_count) ||
+      check_size!=size || MemCmp(check,buf,size)) {
+    Free(check);
+    CadProjectInvalidateSafe(path);
+    Free(buf);
+    CadStatus("Project save verification failed");
+    return FALSE;
+  }
+  Free(check);
+  Free(buf);
+
+  cad_project_slot=slot;
+  cad_project_dirty=FALSE;
+  i=slot-1;
+  cad_recent_available[i]=TRUE;
+  cad_recent_copy[i]=target_copy;
+  cad_recent_serial[i]=serial;
+  cad_recent_tris[i]=cad_tri_count;
+  StrCpy(cad_recent_name[i],cad_name);
+  CadSortRecent;
+  StrPrint(cad_status,"Saved project slot %d on D:",slot);
+  return TRUE;
+}
+
+Bool CadQuickSave()
+{
+  I64 i;
+
+  if (cad_project_slot)
+    return CadSaveProjectSlot(cad_project_slot);
+
+  for (i=0;i<HCAD_PROJECT_SLOTS;i++)
+    if (!cad_recent_available[i])
+      return CadSaveProjectSlot(i+1);
+
+  cad_file_open=TRUE;
+  CadStatus("All slots used - choose 1, 2, or 3 to replace");
+  return FALSE;
+}
+
+Bool CadLoadProjectSlot(I64 slot)
+{
+  U8 path[64],*buf;
+  I64 size;
+  HCadProject *h;
+  HCadTri *tris;
+
+  if (slot<1 || slot>HCAD_PROJECT_SLOTS)
+    return FALSE;
+  if (!CadEnsureProjectDrive) {
+    CadStatus("Persistent D: project disk is not mounted");
+    return FALSE;
+  }
+
+  if (!cad_recent_available[slot-1] ||
+      !(0<=cad_recent_copy[slot-1]<=1)) {
+    CadStatus("Recent project file is missing");
+    return FALSE;
+  }
+  CadProjectPath(path,slot,cad_recent_copy[slot-1]);
+  if (!(buf=CadProjectReadSafe(path,&size))) {
+    CadStatus("Recent project file is missing");
+    CadRefreshRecent;
+    return FALSE;
+  }
+
+  h=buf;
+  if (!CadProjectHeaderOK(h,size)) {
+    Free(buf);
+    CadStatus("Recent project header is invalid");
+    CadRefreshRecent;
+    return FALSE;
+  }
+  tris=buf+sizeof(HCadProject);
+  if (!CadProjectTrisOK(tris,h->tri_count)) {
+    Free(buf);
+    CadStatus("Recent project mesh is invalid");
+    CadRefreshRecent;
+    return FALSE;
+  }
+
+  MemCpy(cad_tris,tris,h->tri_count*sizeof(HCadTri));
+  cad_tri_count=h->tri_count;
+  h->name[31]=0;
+  StrCpy(cad_name,h->name);
+  if (HCAD_TYPE_BOX<=h->type<=HCAD_TYPE_CROSS)
+    cad_type=h->type;
+  else
+    cad_type=HCAD_TYPE_IMPORTED;
+  CadBounds;
+  CadBuildTopology;
+
+  if (h->view_mode==HCAD_VIEW_WIRE ||
+      h->view_mode==HCAD_VIEW_SHADED)
+    cad_view_mode=h->view_mode;
+  else
+    cad_view_mode=HCAD_VIEW_SHADED;
+  cad_selected_dim=CadClampF(h->selected_dim,0,2);
+  if (CadExportCoordOK(h->yaw) && CadExportCoordOK(h->pitch) &&
+      CadExportCoordOK(h->zoom) && h->zoom>0.01 &&
+      CadExportCoordOK(h->view_off_x) &&
+      CadExportCoordOK(h->view_off_y) &&
+      CadExportCoordOK(h->pivot_x) &&
+      CadExportCoordOK(h->pivot_y) &&
+      CadExportCoordOK(h->pivot_z)) {
+    cad_yaw=h->yaw;
+    cad_pitch=h->pitch;
+    cad_zoom=h->zoom;
+    cad_view_off_x=h->view_off_x;
+    cad_view_off_y=h->view_off_y;
+    cad_pivot_x=h->pivot_x;
+    cad_pivot_y=h->pivot_y;
+    cad_pivot_z=h->pivot_z;
+  } else
+    CadFitView;
+  Free(buf);
+
+  cad_mode=HCAD_MODE_OBJECT;
+  cad_object_selected=TRUE;
+  cad_project_active=TRUE;
+  cad_project_dirty=FALSE;
+  cad_project_slot=slot;
+  cad_page=HCAD_PAGE_EDITOR;
+  cad_file_open=FALSE;
+  cad_export_open=FALSE;
+  StrPrint(cad_status,"Opened recent project slot %d",slot);
+  return TRUE;
 }
 
 Bool CadExportMeshOK(Bool need_topology)
@@ -1402,7 +2199,7 @@ Bool CadVerifyExport(U8 *path,I64 expected)
   U8 *check;
   I64 size;
 
-  if (!(check=FileRead(path,&size)))
+  if (!FileFind(path) || !(check=FileRead(path,&size)))
     return FALSE;
   Free(check);
   return size==expected;
@@ -1484,7 +2281,7 @@ U0 CadExportOBJ()
 
   buf=MAlloc(HCAD_EXPORT_BYTES);
   out=buf;
-  StrPrint(out,"# HolyCAD V0.3 mesh export\no HolyCADMesh\n");
+  StrPrint(out,"# HolyCAD V0.4 mesh export\no HolyCADMesh\n");
   out+=StrLen(out);
   for (i=0;i<cad_vertex_count;i++) {
     if (out-buf>HCAD_EXPORT_BYTES-HCAD_EXPORT_GUARD) {
@@ -1536,11 +2333,36 @@ U0 CadExportOBJ()
     CadStatus("OBJ export write verification failed");
 }
 
+U0 CadGoHome()
+{
+  cad_page=HCAD_PAGE_HOME;
+  cad_file_open=FALSE;
+  cad_export_open=FALSE;
+  cad_dragging=FALSE;
+}
+
+U0 CadOpenHelp()
+{
+  cad_help_return=cad_page;
+  cad_page=HCAD_PAGE_HELP;
+  cad_file_open=FALSE;
+  cad_export_open=FALSE;
+  cad_dragging=FALSE;
+}
+
+U0 CadCloseHelp()
+{
+  if (cad_help_return==HCAD_PAGE_EDITOR && cad_project_active)
+    cad_page=HCAD_PAGE_EDITOR;
+  else
+    CadGoHome;
+}
+
 Bool CadPointInUI(I64 x,I64 y)
 {
   if (y<28 || y>=HCAD_VIEW_BOTTOM)
     return TRUE;
-  if (cad_export_open)
+  if (cad_export_open || cad_file_open)
     return TRUE;
   if (cad_tools_open &&
       HCAD_TOOLS_LEFT-2<=x<HCAD_TOOLS_LEFT+HCAD_TOOLS_WIDTH+2 &&
@@ -1555,6 +2377,29 @@ Bool CadPointInUI(I64 x,I64 y)
 
 U0 CadHandleClick(I64 x,I64 y)
 {
+  I64 i;
+
+  if (cad_file_open) {
+    if (HCAD_FILE_LEFT<=x<HCAD_FILE_LEFT+HCAD_FILE_WIDTH) {
+      if (76<=y<100)
+        CadQuickSave;
+      else
+        for (i=0;i<HCAD_PROJECT_SLOTS;i++)
+          if (106+i*30<=y<130+i*30)
+            CadSaveProjectSlot(i+1);
+      if (202<=y<226) {
+        cad_file_open=FALSE;
+        cad_export_open=TRUE;
+        CadStatus("Export menu - 1 STL, 2 OBJ, Esc cancel");
+      } else if (232<=y<256)
+        CadGoHome;
+      else if (262<=y<286)
+        CadOpenHelp;
+    } else
+      cad_file_open=FALSE;
+    return;
+  }
+
   if (cad_export_open) {
     if (HCAD_EXPORT_LEFT<=x<HCAD_EXPORT_LEFT+HCAD_EXPORT_WIDTH &&
         88<=y<112)
@@ -1570,62 +2415,104 @@ U0 CadHandleClick(I64 x,I64 y)
   }
 
   if (y<28) {
-    if (70<=x<120)
-      cad_export_open=TRUE;
-    else if (124<=x<190)
+    if (70<=x<116) {
+      cad_file_open=TRUE;
+      cad_export_open=FALSE;
+    } else if (120<=x<186)
       CadToggleMode;
-    else if (cad_mode==HCAD_MODE_EDIT && 194<=x<224)
+    else if (cad_mode==HCAD_MODE_EDIT && 190<=x<218)
       CadSelectMode(HCAD_SELECT_VERTEX);
-    else if (cad_mode==HCAD_MODE_EDIT && 228<=x<258)
+    else if (cad_mode==HCAD_MODE_EDIT && 222<=x<250)
       CadSelectMode(HCAD_SELECT_EDGE);
-    else if (cad_mode==HCAD_MODE_EDIT && 262<=x<292)
+    else if (cad_mode==HCAD_MODE_EDIT && 254<=x<282)
       CadSelectMode(HCAD_SELECT_FACE);
-    else if (cad_mode==HCAD_MODE_EDIT && 296<=x<366)
+    else if (cad_mode==HCAD_MODE_EDIT && 286<=x<352)
       CadToggleMultiSelect;
-    else if (370<=x<442)
+    else if (356<=x<424)
       CadCycleView;
-    else if (484<=x<552)
+    else if (474<=x<550)
       cad_tools_open=!cad_tools_open;
-    else if (556<=x<636)
+    else if (554<=x<636)
       cad_props_open=!cad_props_open;
     return;
   }
 
   if (cad_tools_open && HCAD_TOOLS_LEFT<=x<
       HCAD_TOOLS_LEFT+HCAD_TOOLS_WIDTH) {
-    if (84<=y<105)
+    if (80<=y<99)
       CadSetMode(HCAD_MODE_OBJECT);
-    else if (109<=y<130)
+    else if (103<=y<122)
       CadSetMode(HCAD_MODE_EDIT);
-    else if (154<=y<175)
+    else if (146<=y<165)
       CadSelectMode(HCAD_SELECT_VERTEX);
-    else if (179<=y<200)
+    else if (169<=y<188)
       CadSelectMode(HCAD_SELECT_EDGE);
-    else if (204<=y<225)
+    else if (192<=y<211)
       CadSelectMode(HCAD_SELECT_FACE);
-    else if (229<=y<250)
+    else if (215<=y<234)
       CadToggleMultiSelect;
-    else if (274<=y<295)
+    else if (259<=y<278)
+      CadSelectCross;
+    else if (282<=y<301)
       CadSelectBox;
-    else if (299<=y<320)
+    else if (305<=y<324)
       CadSelectCylinder;
-    else if (324<=y<345)
+    else if (328<=y<347)
       CadLoadSTL("C:/HolyGem.STL");
-    else if (369<=y<390)
+    else if (372<=y<391)
       CadCycleView;
-    else if (394<=y<415) {
+    else if (395<=y<414) {
       cad_show_gizmo=!cad_show_gizmo;
       CadStatus("Transform gizmo toggled");
-    } else if (419<=y<440)
-      cad_export_open=TRUE;
+    } else if (418<=y<437) {
+      cad_file_open=TRUE;
+    }
     return;
   }
+}
+
+U0 CadHandleHomeClick(I64 x,I64 y)
+{
+  I64 i,slot;
+
+  if (176<=x<464 && 132<=y<166) {
+    CadNewProject;
+    return;
+  }
+  if (cad_project_active && 176<=x<464 && 172<=y<202) {
+    cad_page=HCAD_PAGE_EDITOR;
+    return;
+  }
+  if (136<=x<504)
+    for (i=0;i<HCAD_PROJECT_SLOTS;i++)
+      if (244+i*34<=y<270+i*34) {
+        slot=cad_recent_order[i];
+        if (cad_recent_available[slot])
+          CadLoadProjectSlot(slot+1);
+        return;
+      }
+  if (176<=x<312 && 370<=y<404)
+    CadOpenHelp;
+  else if (328<=x<464 && 370<=y<404)
+    cad_quit=TRUE;
 }
 
 U0 CadMouse()
 {
   I64 x=ms.pos.x-Fs->pix_left-Fs->scroll_x;
   I64 y=ms.pos.y-Fs->pix_top-Fs->scroll_y;
+
+  if (cad_page!=HCAD_PAGE_EDITOR) {
+    if (ms.lb && !cad_prev_lb) {
+      if (cad_page==HCAD_PAGE_HOME)
+        CadHandleHomeClick(x,y);
+      else if (cad_page==HCAD_PAGE_HELP &&
+          224<=x<416 && 386<=y<410)
+        CadCloseHelp;
+    }
+    cad_prev_lb=ms.lb;
+    return;
+  }
 
   if (ms.lb && !cad_prev_lb) {
     if (CadPointInUI(x,y))
@@ -1646,6 +2533,8 @@ U0 CadMouse()
         (y-cad_drag_start_y)*(y-cad_drag_start_y)>25)
       cad_drag_moved=TRUE;
     if (cad_drag_moved) {
+      if (x!=cad_drag_x || y!=cad_drag_y)
+        cad_project_dirty=TRUE;
       cad_yaw+=(x-cad_drag_x)*0.012;
       cad_pitch+=(y-cad_drag_y)*0.012;
       cad_pitch=CadClampF(cad_pitch,-1.45,1.45);
@@ -1664,9 +2553,78 @@ U0 CadMouse()
 
 U0 CadReadKeys()
 {
-  I64 ch,sc;
+  I64 ch,sc,row,slot;
   while (ScanKey(&ch,&sc)) {
-    if (cad_export_open) {
+    if (cad_page==HCAD_PAGE_HOME) {
+      switch (ch) {
+        case 'n':
+        case 'N':
+          CadNewProject;
+          break;
+        case 'c':
+        case 'C':
+          if (cad_project_active)
+            cad_page=HCAD_PAGE_EDITOR;
+          break;
+        case '1':
+        case '2':
+        case '3':
+          row=ch-'1';
+          slot=cad_recent_order[row];
+          if (cad_recent_available[slot])
+            CadLoadProjectSlot(slot+1);
+          break;
+        case '?':
+          CadOpenHelp;
+          break;
+        case CH_ESC:
+        case CH_SHIFT_ESC:
+          cad_quit=TRUE;
+          break;
+      }
+    } else if (cad_page==HCAD_PAGE_HELP) {
+      switch (ch) {
+        case '?':
+        case 'h':
+        case 'H':
+        case CH_ESC:
+        case CH_SHIFT_ESC:
+          CadCloseHelp;
+          break;
+      }
+    } else if (cad_file_open) {
+      switch (ch) {
+        case '1':
+        case '2':
+        case '3':
+          CadSaveProjectSlot(ch-'0');
+          break;
+        case 's':
+        case 'S':
+          CadQuickSave;
+          break;
+        case 'p':
+        case 'P':
+          cad_file_open=FALSE;
+          cad_export_open=TRUE;
+          CadStatus("Export menu - 1 STL, 2 OBJ, Esc cancel");
+          break;
+        case 'h':
+        case 'H':
+          CadGoHome;
+          break;
+        case '?':
+          CadOpenHelp;
+          break;
+        case 'f':
+        case 'F':
+        case CH_ESC:
+        case CH_SHIFT_ESC:
+          cad_file_open=FALSE;
+          CadStatus("File menu closed");
+          break;
+      }
+    } else if (cad_export_open) {
       switch (ch) {
         case '1':
           CadExportSTL;
@@ -1688,15 +2646,19 @@ U0 CadReadKeys()
           switch (sc.u8[0]) {
             case SC_CURSOR_LEFT:
               cad_yaw-=0.12;
+              cad_project_dirty=TRUE;
               break;
             case SC_CURSOR_RIGHT:
               cad_yaw+=0.12;
+              cad_project_dirty=TRUE;
               break;
             case SC_CURSOR_UP:
               cad_pitch=CadClampF(cad_pitch-0.10,-1.45,1.45);
+              cad_project_dirty=TRUE;
               break;
             case SC_CURSOR_DOWN:
               cad_pitch=CadClampF(cad_pitch+0.10,-1.45,1.45);
+              cad_project_dirty=TRUE;
               break;
           }
           break;
@@ -1712,9 +2674,18 @@ U0 CadReadKeys()
         case CH_CTRLI:
           CadToggleMode;
           break;
+        case CH_CTRLS:
+          CadQuickSave;
+          break;
         case 'q':
         case 'Q':
           CadToggleMultiSelect;
+          break;
+        case '[':
+          CadStepSelection(-1);
+          break;
+        case ']':
+          CadStepSelection(1);
           break;
         case 'b':
         case 'B':
@@ -1724,6 +2695,10 @@ U0 CadReadKeys()
         case 'C':
           CadSelectCylinder;
           break;
+        case 'k':
+        case 'K':
+          CadSelectCross;
+          break;
         case 'o':
         case 'O':
           CadLoadSTL("C:/HolyGem.STL");
@@ -1731,32 +2706,39 @@ U0 CadReadKeys()
         case 'a':
         case 'A':
           cad_yaw-=0.12;
+          cad_project_dirty=TRUE;
           break;
         case 'd':
         case 'D':
           cad_yaw+=0.12;
+          cad_project_dirty=TRUE;
           break;
         case 'w':
         case 'W':
           cad_pitch=CadClampF(cad_pitch-0.10,-1.45,1.45);
+          cad_project_dirty=TRUE;
           break;
         case 's':
         case 'S':
           cad_pitch=CadClampF(cad_pitch+0.10,-1.45,1.45);
+          cad_project_dirty=TRUE;
           break;
         case 'x':
         case 'X':
           cad_selected_dim=0;
+          cad_project_dirty=TRUE;
           CadStatus("X transform axis selected");
           break;
         case 'y':
         case 'Y':
           cad_selected_dim=1;
+          cad_project_dirty=TRUE;
           CadStatus("Y transform axis selected");
           break;
         case 'z':
         case 'Z':
           cad_selected_dim=2;
+          cad_project_dirty=TRUE;
           CadStatus("Z transform axis selected");
           break;
         case ',':
@@ -1786,27 +2768,44 @@ U0 CadReadKeys()
           break;
         case 'p':
         case 'P':
+          cad_file_open=FALSE;
           cad_export_open=TRUE;
           CadStatus("Export menu - 1 STL, 2 OBJ, Esc cancel");
+          break;
+        case 'f':
+        case 'F':
+          cad_export_open=FALSE;
+          cad_file_open=TRUE;
+          CadStatus("File menu - save slots, export, home");
+          break;
+        case 'h':
+        case 'H':
+          CadGoHome;
+          break;
+        case '?':
+          CadOpenHelp;
           break;
         case 'r':
         case 'R':
           CadFitView;
           cad_yaw=-0.65;
           cad_pitch=0.58;
+          cad_project_dirty=TRUE;
           CadStatus("View framed around mesh");
           break;
         case '+':
         case '=':
           cad_zoom*=1.12;
+          cad_project_dirty=TRUE;
           break;
         case '-':
         case '_':
           cad_zoom/=1.12;
+          cad_project_dirty=TRUE;
           break;
         case CH_ESC:
         case CH_SHIFT_ESC:
-          cad_quit=TRUE;
+          CadGoHome;
           break;
       }
     }
@@ -1875,6 +2874,20 @@ Bool CadGeometryTest()
   CadBuildTopology;
   if (cad_vertex_count!=66 || cad_edge_count!=192)
     return FALSE;
+
+  cad_width=42;
+  cad_depth=10;
+  cad_height=60;
+  CadBuildCross;
+  if (cad_tri_count!=44)
+    return FALSE;
+  if (Abs((cad_max_x-cad_min_x)-42)>0.001 ||
+      Abs((cad_max_y-cad_min_y)-10)>0.001 ||
+      Abs((cad_max_z-cad_min_z)-60)>0.001)
+    return FALSE;
+  CadBuildTopology;
+  if (cad_vertex_count!=24 || cad_edge_count!=66)
+    return FALSE;
   return TRUE;
 }
 
@@ -1894,15 +2907,25 @@ U0 HolyCAD()
   cad_tools_open=TRUE;
   cad_props_open=FALSE;
   cad_export_open=FALSE;
+  cad_file_open=FALSE;
   cad_multi_select=FALSE;
   cad_mode=HCAD_MODE_OBJECT;
   cad_view_mode=HCAD_VIEW_SHADED;
   cad_select_mode=HCAD_SELECT_VERTEX;
   cad_selected=-1;
+  cad_page=HCAD_PAGE_HOME;
+  cad_help_return=HCAD_PAGE_HOME;
+  cad_project_active=FALSE;
+  cad_project_dirty=FALSE;
+  cad_project_drive_ready=FALSE;
+  cad_project_slot=0;
   cad_yaw=-0.65;
   cad_pitch=0.58;
-  CadSelectBox;
-  CadStatus("Object: Tab edit | T/N panels | P export");
+  CadSelectCross;
+  cad_project_active=FALSE;
+  cad_project_dirty=FALSE;
+  CadRefreshRecent;
+  CadStatus("Home: N new | 1-3 recent | ? help");
 
   Fs->draw_it=&HolyCADDraw;
   try {

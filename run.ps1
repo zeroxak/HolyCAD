@@ -7,8 +7,8 @@ $IsoPath = if ($env:TEMPLEOS_ISO) {
 } else {
     Join-Path $ProjectDir "TempleOS.ISO"
 }
-$DiskPath = Join-Path $AppDir "HolyCADShare.img"
-$CompressedDiskPath = "$DiskPath.gz"
+$SourceDiskPath = Join-Path $AppDir "HolyCADShare.img"
+$ProjectDiskPath = Join-Path $AppDir "HolyCADProjects.img"
 $DiskSize = [Int64]67108864
 
 $QemuCommand = Get-Command "qemu-system-x86_64.exe" -ErrorAction SilentlyContinue
@@ -25,17 +25,32 @@ if (-not (Test-Path $IsoPath)) {
     throw "TempleOS ISO not found at $IsoPath. Place TempleOS.ISO one directory above HolyCAD or set TEMPLEOS_ISO."
 }
 $IsoPath = (Resolve-Path -LiteralPath $IsoPath).Path
-if (Test-Path -LiteralPath $DiskPath) {
-    $ActualDiskSize = (Get-Item -LiteralPath $DiskPath).Length
-    if ($ActualDiskSize -ne $DiskSize) {
-        throw "HolyCAD transfer image has the wrong size: $ActualDiskSize bytes. Expected $DiskSize bytes. Move or remove the invalid image manually."
-    }
-} else {
-    if (-not (Test-Path -LiteralPath $CompressedDiskPath)) {
-        throw "Neither HolyCADShare.img nor HolyCADShare.img.gz was found."
+
+function Ensure-DiskImage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DiskPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+        [Parameter(Mandatory = $true)]
+        [bool]$RefreshFromBundle
+    )
+
+    if (Test-Path -LiteralPath $DiskPath) {
+        $ActualDiskSize = (Get-Item -LiteralPath $DiskPath).Length
+        if (($ActualDiskSize -ne $DiskSize) -and (-not $RefreshFromBundle)) {
+            throw "$Label has the wrong size: $ActualDiskSize bytes. Expected $DiskSize bytes. Move or remove the invalid image manually."
+        }
+        if (-not $RefreshFromBundle) {
+            return
+        }
     }
 
-    Write-Host "Unpacking HolyCADShare.img.gz..."
+    $CompressedDiskPath = "$DiskPath.gz"
+    if (-not (Test-Path -LiteralPath $CompressedDiskPath)) {
+        throw "$Label was not found at $CompressedDiskPath."
+    }
+
     $TempDiskPath = "$DiskPath.tmp.$([Guid]::NewGuid().ToString('N'))"
     try {
         $InputStream = [System.IO.File]::OpenRead($CompressedDiskPath)
@@ -63,9 +78,21 @@ if (Test-Path -LiteralPath $DiskPath) {
             throw "Unpacked image has the wrong size: $ActualDiskSize bytes. Expected $DiskSize bytes."
         }
         if (Test-Path -LiteralPath $DiskPath) {
-            throw "HolyCADShare.img appeared while unpacking; it was not overwritten."
+            if (-not $RefreshFromBundle) {
+                throw "$(Split-Path -Leaf $DiskPath) appeared while unpacking; it was not overwritten."
+            }
+            $BundledHash = (Get-FileHash -LiteralPath $TempDiskPath -Algorithm SHA256).Hash
+            $CurrentHash = (Get-FileHash -LiteralPath $DiskPath -Algorithm SHA256).Hash
+            if ($BundledHash -eq $CurrentHash) {
+                return
+            }
+            Write-Host "Refreshing $(Split-Path -Leaf $DiskPath)..."
+            Move-Item -LiteralPath $TempDiskPath -Destination $DiskPath -Force
+            $TempDiskPath = $null
+            return
         }
 
+        Write-Host "Unpacking $(Split-Path -Leaf $CompressedDiskPath)..."
         [System.IO.File]::Move($TempDiskPath, $DiskPath)
         $TempDiskPath = $null
     } finally {
@@ -75,10 +102,8 @@ if (Test-Path -LiteralPath $DiskPath) {
     }
 }
 
-$ActualDiskSize = (Get-Item -LiteralPath $DiskPath).Length
-if ($ActualDiskSize -ne $DiskSize) {
-    throw "HolyCAD transfer image has the wrong size: $ActualDiskSize bytes. Expected $DiskSize bytes."
-}
+Ensure-DiskImage -DiskPath $SourceDiskPath -Label "HolyCAD source disk" -RefreshFromBundle $true
+Ensure-DiskImage -DiskPath $ProjectDiskPath -Label "HolyCAD project disk" -RefreshFromBundle $false
 
 Push-Location $AppDir
 try {
@@ -89,7 +114,8 @@ try {
         -smp "1" `
         -m "512" `
         -boot "order=d" `
-        -drive "file.filename=$DiskPath,if=ide,index=0,format=raw" `
+        -drive "file.filename=$SourceDiskPath,file.locking=off,if=ide,index=0,format=raw" `
+        -drive "file.filename=$ProjectDiskPath,file.locking=off,if=ide,index=1,format=raw" `
         -drive "file.filename=$IsoPath,if=ide,index=2,media=cdrom,readonly=on,format=raw" `
         -vga "std" `
         -display "sdl" `

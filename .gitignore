@@ -3,6 +3,7 @@
 
 # Local unpacked QEMU media
 HolyCADShare.img
+HolyCADProjects.img
 *.qcow2
 *.raw
 *.sav

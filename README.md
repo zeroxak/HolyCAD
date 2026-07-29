@@ -1,8 +1,9 @@
 # HolyCAD
 
-A compact Blender-inspired mesh editor written in native HolyC for TempleOS.
+A native HolyC mesh editor for TempleOS with object/edit modes, component
+selection, persistent projects, model import, and mesh export.
 
-![Imported model in HolyCAD](screenshots/imported-model.png)
+![HolyGem model imported in HolyCAD](screenshots/imported-model.png)
 
 ## Quick start
 
@@ -13,16 +14,16 @@ TempleOS/
 ├── TempleOS.ISO
 └── HolyCAD/
     ├── HolyCADShare.img.gz
+    ├── HolyCADProjects.img.gz
     ├── run.command
     └── run.ps1
 ```
 
-The launchers unpack the included 64 MB share disk automatically and open
-TempleOS in a QEMU window.
+Both launchers unpack the bundled disks on first run. The source disk is
+refreshed from the bundle when needed; the project disk is reused so saves
+survive QEMU restarts.
 
 ### macOS
-
-Install QEMU, then run from the `HolyCAD` directory:
 
 ```sh
 brew install qemu
@@ -30,116 +31,110 @@ chmod +x run.command
 ./run.command
 ```
 
+Use an ISO stored elsewhere:
+
+```sh
+TEMPLEOS_ISO=/path/to/TempleOS.ISO ./run.command
+```
+
 ### Windows
 
 Install [QEMU for Windows](https://www.qemu.org/download/#windows), open
-PowerShell in the `HolyCAD` directory, and run:
+PowerShell in the `HolyCAD` directory, then run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\run.ps1
 ```
 
-The script checks `PATH` and `C:\Program Files\qemu` for QEMU. On either
-platform, set `TEMPLEOS_ISO` to use an ISO stored elsewhere.
+For an ISO stored elsewhere:
 
-## Start HolyCAD in TempleOS
+```powershell
+$env:TEMPLEOS_ISO = "C:\path\to\TempleOS.ISO"
+.\run.ps1
+```
+
+## Launch in TempleOS
 
 On a fresh boot:
 
-1. Answer `n` to installing TempleOS.
-2. Answer `n` to taking the tour.
-3. At `T:/Home>`, enter:
-
-   ```c
-   Mount;
-   ```
-
-4. Enter these mount values in order:
+1. Answer `n` to installation and `n` to the tour.
+2. Enter `Mount;` at `T:/Home>`.
+3. Mount the source disk with:
 
    ```text
    Drive letter:     C
-   Partition:        1
-   Hardware probe:   s (skip)
+   Partition:        Enter
+   Hardware probe:   s
    IDE base port 0:  0x1f0
    IDE base port 1:  0x3f4
    Unit:             0
    ```
 
-5. Press Enter without a drive letter at the next mount prompt.
-6. Launch the exact-case filename:
+4. Press Enter at the next drive-letter prompt.
+5. Launch:
 
    ```c
    #include "C:/HolyCAD.HC";
    ```
 
-After exiting, enter `HolyCAD;` to reopen it without compiling the file again.
+HolyCAD mounts its persistent `D:` project disk automatically. After exiting,
+enter `HolyCAD;` to reopen it without recompiling.
+
+## Projects
+
+![HolyCAD home and Open Recent](screenshots/home.png)
+
+`Start New Project` opens the Holy Cross. `Ctrl-S` saves to the current or
+first empty slot. Press `F` to choose one of three slots, then `H` to return
+Home and open it from `Open Recent`.
+
+![Default Holy Cross project](screenshots/holy-cross.png)
+
+Projects are stored under `D:/HolyCAD`. Each slot alternates between two
+verified generations so the previous good save remains available if a write
+fails. Back up `HolyCADProjects.img` to back up all projects.
+
+![HolyCAD project menu](screenshots/project-menu.png)
 
 ## Controls
 
 | Input | Action |
 | --- | --- |
-| `Tab` | Toggle Object Mode / Edit Mode |
-| `B` / `C` | Create a box / cylinder |
-| `O` | Import `C:/HolyGem.STL` |
+| `Tab` | Object Mode / Edit Mode |
+| Click / drag | Select / orbit camera |
 | `1` / `2` / `3` | Vertex / edge / face selection |
-| `Q` | Toggle component multi-selection |
-| Click | Select the object or active component |
-| Drag | Orbit the camera |
-| `A` / `D`, `W` / `S` | Orbit horizontally / vertically |
-| Arrow keys | Orbit the camera |
-| `+` / `-` | Zoom |
-| `R` | Frame the mesh and reset the view |
-| `M` | Toggle shaded / wireframe view |
-| `G` | Toggle the transform gizmo |
-| `X` / `Y` / `Z` | Choose the movement axis |
+| `Q` | Toggle multi-selection |
+| `[` / `]` | Cycle components; add while multi-select is on |
+| `X` / `Y` / `Z` | Choose movement axis |
 | `,` / `.` | Move -/+ 1 mm |
-| `T` / `N` | Toggle Tools / Inspector overlays |
-| `P` | Open the Export menu |
-| `Esc` | Close the menu, or exit HolyCAD |
+| `K` / `B` / `C` | Holy Cross / box / cylinder |
+| `O` | Import `C:/HolyGem.STL` |
+| `M` | Shaded / wireframe |
+| `WASD` / arrows | Orbit camera |
+| `+` / `-` / `R` | Zoom / frame mesh |
+| `T` / `N` / `G` | Tools / Inspector / gizmo |
+| `Ctrl-S` / `F` | Quick save / project menu |
+| `H` / `?` | Home / Help |
+| `Esc` | Close menu, return Home, then exit |
 
-Object Mode moves the complete mesh. Edit Mode exposes an x-ray topology
-overlay for selecting and moving vertices, edges, or faces while retaining the
-shaded form beneath it.
+![Vertex multi-selection](screenshots/multi-selection.png)
 
-![Edit-mode component selection](screenshots/multi-selection.png)
+The Help page includes the complete vertex-movement sequence and the controls
+that are not visible in the main viewport.
 
-Collapse both side panels for an unobstructed viewport:
-
-![Open viewport](screenshots/open-viewport.png)
+![HolyCAD Help](screenshots/help.png)
 
 ## Import and export
 
-The bundled import command reads:
-
-```text
-C:/HolyGem.STL
-```
-
-Press `P` to open the Export menu, then choose:
+Press `O` to import the bundled ASCII STL model. Press `P`, then choose:
 
 | Key | Format | Output |
 | --- | --- | --- |
 | `1` | ASCII STL | `B:/HOLYCAD.STL` |
 | `2` | Wavefront OBJ | `B:/HOLYCAD.OBJ` |
 
-Exports include the current object and component edits and remain available
+Exports include current object and component edits. The `B:` work disk lasts
 for the current TempleOS session.
 
 ![Mesh export menu](screenshots/export-menu.png)
-
-Press `M` to switch between basic shaded rendering and the fully open
-wireframe view.
-
-![Wireframe view](screenshots/wireframe-mode.png)
-
-## Package contents
-
-| File | Purpose |
-| --- | --- |
-| `HolyCAD.HC` | HolyC source |
-| `DATA/HolyGem.STL` | Bundled ASCII STL demo model |
-| `HolyCADShare.img.gz` | Compressed TempleOS share disk |
-| `run.command` | macOS QEMU launcher |
-| `run.ps1` | Windows QEMU launcher |
-| `screenshots/` | Native TempleOS screenshots |
