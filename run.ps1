@@ -9,6 +9,7 @@ $IsoPath = if ($env:TEMPLEOS_ISO) {
 }
 $DiskPath = Join-Path $AppDir "HolyCADShare.img"
 $CompressedDiskPath = "$DiskPath.gz"
+$DiskSize = [Int64]67108864
 
 $QemuCommand = Get-Command "qemu-system-x86_64.exe" -ErrorAction SilentlyContinue
 if ($QemuCommand) {
@@ -23,31 +24,60 @@ if (-not (Test-Path $QemuPath)) {
 if (-not (Test-Path $IsoPath)) {
     throw "TempleOS ISO not found at $IsoPath. Place TempleOS.ISO one directory above HolyCAD or set TEMPLEOS_ISO."
 }
-if (-not (Test-Path $DiskPath)) {
-    if (-not (Test-Path $CompressedDiskPath)) {
+$IsoPath = (Resolve-Path -LiteralPath $IsoPath).Path
+if (Test-Path -LiteralPath $DiskPath) {
+    $ActualDiskSize = (Get-Item -LiteralPath $DiskPath).Length
+    if ($ActualDiskSize -ne $DiskSize) {
+        throw "HolyCAD transfer image has the wrong size: $ActualDiskSize bytes. Expected $DiskSize bytes. Move or remove the invalid image manually."
+    }
+} else {
+    if (-not (Test-Path -LiteralPath $CompressedDiskPath)) {
         throw "Neither HolyCADShare.img nor HolyCADShare.img.gz was found."
     }
 
     Write-Host "Unpacking HolyCADShare.img.gz..."
-    $InputStream = [System.IO.File]::OpenRead($CompressedDiskPath)
+    $TempDiskPath = "$DiskPath.tmp.$([Guid]::NewGuid().ToString('N'))"
     try {
-        $GzipStream = [System.IO.Compression.GZipStream]::new(
-            $InputStream,
-            [System.IO.Compression.CompressionMode]::Decompress
-        )
+        $InputStream = [System.IO.File]::OpenRead($CompressedDiskPath)
         try {
-            $OutputStream = [System.IO.File]::Create($DiskPath)
+            $GzipStream = [System.IO.Compression.GZipStream]::new(
+                $InputStream,
+                [System.IO.Compression.CompressionMode]::Decompress
+            )
             try {
-                $GzipStream.CopyTo($OutputStream)
+                $OutputStream = [System.IO.File]::Create($TempDiskPath)
+                try {
+                    $GzipStream.CopyTo($OutputStream)
+                } finally {
+                    $OutputStream.Dispose()
+                }
             } finally {
-                $OutputStream.Dispose()
+                $GzipStream.Dispose()
             }
         } finally {
-            $GzipStream.Dispose()
+            $InputStream.Dispose()
         }
+
+        $ActualDiskSize = (Get-Item -LiteralPath $TempDiskPath).Length
+        if ($ActualDiskSize -ne $DiskSize) {
+            throw "Unpacked image has the wrong size: $ActualDiskSize bytes. Expected $DiskSize bytes."
+        }
+        if (Test-Path -LiteralPath $DiskPath) {
+            throw "HolyCADShare.img appeared while unpacking; it was not overwritten."
+        }
+
+        [System.IO.File]::Move($TempDiskPath, $DiskPath)
+        $TempDiskPath = $null
     } finally {
-        $InputStream.Dispose()
+        if ($TempDiskPath -and (Test-Path -LiteralPath $TempDiskPath)) {
+            Remove-Item -LiteralPath $TempDiskPath -Force -ErrorAction SilentlyContinue
+        }
     }
+}
+
+$ActualDiskSize = (Get-Item -LiteralPath $DiskPath).Length
+if ($ActualDiskSize -ne $DiskSize) {
+    throw "HolyCAD transfer image has the wrong size: $ActualDiskSize bytes. Expected $DiskSize bytes."
 }
 
 Push-Location $AppDir
@@ -59,8 +89,8 @@ try {
         -smp "1" `
         -m "512" `
         -boot "order=d" `
-        -drive "file=HolyCADShare.img,if=ide,index=0,format=raw" `
-        -drive "file=..\TempleOS.ISO,if=ide,index=2,media=cdrom,readonly=on,format=raw" `
+        -drive "file.filename=$DiskPath,if=ide,index=0,format=raw" `
+        -drive "file.filename=$IsoPath,if=ide,index=2,media=cdrom,readonly=on,format=raw" `
         -vga "std" `
         -display "sdl" `
         -nic "none"

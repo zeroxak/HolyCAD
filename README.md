@@ -1,97 +1,51 @@
 # HolyCAD
 
-HolyCAD is an experimental low-poly mesh editor, CAD-style workspace, and
-mesh slicer written in native HolyC for TempleOS. V0.2 pushes it toward a
-small, barely-functional Blender: mesh components can be selected and moved,
-the viewport can be shaded or wireframe, and selections get an axis gizmo.
+A compact Blender-inspired mesh editor written in native HolyC for TempleOS.
 
-It is deliberately built around TempleOS constraints: a 640x480 interface,
-single-task drawing callback, direct keyboard and mouse input, and no external
-graphics or geometry libraries.
+![Imported model in HolyCAD](screenshots/imported-model.png)
 
-![HolyCAD model workspace](screenshots/model-workspace.png)
+## Quick start
 
-## What works
+Place `TempleOS.ISO` one directory above the `HolyCAD` folder:
 
-- CAD-style docked workspace with a viewport, creation tools, inspector,
-  slicer settings, status bar, and model/slice workspaces
-- Parametric boxes and 32-sided cylinders
-- Editable X, Y, and Z dimensions
-- Unique-vertex and unique-edge topology derived from triangle meshes
-- Click selection modes for vertices, edges, and faces
-- Selected-component movement along an active X, Y, or Z axis
-- Toggleable RGB transform gizmo at the selected component
-- Cycleable orthographic wireframe and basic shaded viewport modes
-- Keyboard/arrow-key orbit, mouse-drag orbit, zoom, and fit/reset
-- Click-versus-drag handling so a selection click does not disturb the camera
-- ASCII STL import and automatic centering
-- Real triangle/Z-plane intersection slicing
-- 200x200 mm print-bed preview
-- Alternating horizontal and vertical clipped infill previews
-- Layer-by-layer navigation at 0.20 mm
-- Educational perimeter G-code generation
-- Startup geometry and topology self-tests
+```text
+TempleOS/
+├── TempleOS.ISO
+└── HolyCAD/
+    ├── HolyCADShare.img.gz
+    ├── run.command
+    └── run.ps1
+```
 
-![Vertex selection and transform gizmo](screenshots/vertex-selection.png)
-![Edge selection in shaded mode](screenshots/edge-selection.png)
-![Face selection in shaded mode](screenshots/face-selection.png)
-![Wireframe viewport mode](screenshots/wireframe-mode.png)
-![Cylinder slice with horizontal infill](screenshots/slice-layer-horizontal.png)
-![Imported ASCII STL](screenshots/stl-import.png)
+The launchers unpack the included 64 MB share disk automatically and open
+TempleOS in a QEMU window.
 
-## Files
+### macOS
 
-| File | Purpose |
-| --- | --- |
-| `HolyCAD.HC` | HolyC source |
-| `HolyCube.STL` | 20 mm ASCII STL test model |
-| `HolyCADShare.img.gz` | Compact distributable transfer disk |
-| `HolyCADShare.img` | Unpacked local QEMU disk, ignored by Git |
-| `run.command` | macOS QEMU launcher |
-| `run.ps1` | Windows QEMU launcher |
-| `screenshots/` | Native TempleOS/QEMU test evidence |
-
-Both launchers automatically unpack `HolyCADShare.img.gz` when the local
-`HolyCADShare.img` is absent.
-
-## Start on macOS
-
-Requirements:
-
-- QEMU with `qemu-system-x86_64`
-- `TempleOS.ISO` in the directory above `HolyCAD`
-- `HolyCADShare.img.gz` from the repository
-
-From Terminal:
+Install QEMU, then run from the `HolyCAD` directory:
 
 ```sh
-cd HolyCAD
+brew install qemu
 chmod +x run.command
 ./run.command
 ```
 
-The launcher uses QEMU's Cocoa display, so HolyCAD runs in a normal window.
+### Windows
 
-## Start on Windows
-
-Requirements:
-
-- QEMU for Windows
-- `TempleOS.ISO` in the directory above `HolyCAD`
-- `HolyCADShare.img.gz` from the repository
-
-If QEMU is on `PATH`, open PowerShell in the `HolyCAD` directory and run:
+Install [QEMU for Windows](https://www.qemu.org/download/#windows), open
+PowerShell in the `HolyCAD` directory, and run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\run.ps1
 ```
 
-The script also checks the standard `C:\Program Files\qemu` location.
+The script checks `PATH` and `C:\Program Files\qemu` for QEMU. On either
+platform, set `TEMPLEOS_ISO` to use an ISO stored elsewhere.
 
-## Start HolyCAD inside TempleOS
+## Start HolyCAD in TempleOS
 
-On a fresh live-CD boot:
+On a fresh boot:
 
 1. Answer `n` to installing TempleOS.
 2. Answer `n` to taking the tour.
@@ -101,132 +55,91 @@ On a fresh live-CD boot:
    Mount;
    ```
 
-4. In the mount wizard:
+4. Enter these mount values in order:
 
-   - Drive letter: `C`
-   - Partition: `1`
-   - Press `p` to probe
-   - Select device `1`, the primary IDE hard drive
-   - Press Enter at the next drive-letter prompt to finish
+   ```text
+   Drive letter:     C
+   Partition:        1
+   Hardware probe:   s (skip)
+   IDE base port 0:  0x1f0
+   IDE base port 1:  0x3f4
+   Unit:             0
+   ```
 
-5. Launch the exact-case filename:
+5. Press Enter without a drive letter at the next mount prompt.
+6. Launch the exact-case filename:
 
    ```c
    #include "C:/HolyCAD.HC";
    ```
 
-TempleOS filenames are case-sensitive. The program disables the autocomplete
-popup while it is open and restores the previous setting when it exits.
+After exiting, enter `HolyCAD;` to reopen it without compiling the file again.
 
 ## Controls
 
-| Key/input | Action |
+| Input | Action |
 | --- | --- |
-| `1` | Create/reset parametric box |
-| `2` | Create/reset parametric cylinder |
-| `O` | Import `C:/HolyCube.STL` |
-| `V` | Model workspace |
-| `L` | Slice workspace |
-| `Q` | Vertex-selection mode |
-| `E` | Edge-selection mode |
-| `F` | Face-selection mode |
-| `Tab` | Cycle vertex/edge/face selection mode |
-| Mouse click | Select the component under the cursor |
-| Mouse drag | Orbit the model |
-| `A` / `D` or Left/Right | Orbit yaw |
-| `W` / `S` or Up/Down | Orbit pitch |
+| `Tab` | Toggle Object Mode / Edit Mode |
+| `B` / `C` | Create a box / cylinder |
+| `O` | Import `C:/HolyGem.STL` |
+| `1` / `2` / `3` | Vertex / edge / face selection |
+| `Q` | Toggle component multi-selection |
+| Click | Select the object or active component |
+| Drag | Orbit the camera |
+| `A` / `D`, `W` / `S` | Orbit horizontally / vertically |
+| Arrow keys | Orbit the camera |
 | `+` / `-` | Zoom |
-| `R` | Fit and reset view |
-| `M` | Cycle wireframe/shaded viewport |
+| `R` | Frame the mesh and reset the view |
+| `M` | Toggle shaded / wireframe view |
 | `G` | Toggle the transform gizmo |
-| `X`, `Y`, `Z` | Choose the active transform/dimension axis |
-| `,` / `.` | Move the selection -/+ 1 mm; resize when nothing is selected |
-| `<` / `>` | Previous/next slice layer |
-| `I` | Toggle infill preview |
-| `P` | Export educational G-code |
-| `Esc` | Exit HolyCAD |
+| `X` / `Y` / `Z` | Choose the movement axis |
+| `,` / `.` | Move -/+ 1 mm |
+| `T` / `N` | Toggle Tools / Inspector overlays |
+| `P` | Open the Export menu |
+| `Esc` | Close the menu, or exit HolyCAD |
 
-The left-side buttons can also be clicked. Component movement updates every
-triangle that shares the selected topology vertex, so connected faces stay
-connected. Rebuilding a parametric primitive with `1`, `2`, or a dimension
-change intentionally discards component-level edits.
+Object Mode moves the complete mesh. Edit Mode exposes an x-ray topology
+overlay for selecting and moving vertices, edges, or faces while retaining the
+shaded form beneath it.
 
-## G-code output
+![Edit-mode component selection](screenshots/multi-selection.png)
 
-Pressing `P` writes:
+Collapse both side panels for an unobstructed viewport:
+
+![Open viewport](screenshots/open-viewport.png)
+
+## Import and export
+
+The bundled import command reads:
 
 ```text
-B:/HolyCAD.GCODE
+C:/HolyGem.STL
 ```
 
-`B:` is TempleOS's writable RedSea RAM disk during a live-CD session. The file
-is therefore temporary and disappears when the VM shuts down. Confirm it with:
+Press `P` to open the Export menu, then choose:
 
-```c
-Dir("B:/");
-```
+| Key | Format | Output |
+| --- | --- | --- |
+| `1` | ASCII STL | `B:/HOLYCAD.STL` |
+| `2` | Wavefront OBJ | `B:/HOLYCAD.OBJ` |
 
-On the tested default 40x30x20 mm box, the exporter produced a 58,708-byte
-file. The output contains layer comments, absolute positioning, perimeter
-moves, extrusion values, and shutdown commands.
+Exports include the current object and component edits and remain available
+for the current TempleOS session.
 
-This is an educational exporter, not production-ready printer output. It does
-not yet chain perimeter segments, emit the displayed infill, generate supports,
-or apply a printer/material profile. Review and post-process every file before
-using it with hardware.
+![Mesh export menu](screenshots/export-menu.png)
 
-## Native test results
+Press `M` to switch between basic shaded rendering and the fully open
+wireframe view.
 
-The current source was compiled and exercised in TempleOS 5.03 under QEMU:
+![Wireframe view](screenshots/wireframe-mode.png)
 
-| Test | Result |
+## Package contents
+
+| File | Purpose |
 | --- | --- |
-| HolyC compile and launch | Pass |
-| Box generator/topology | 8 vertices, 18 edges, 12 faces |
-| Box bounds | 40x30x20 mm |
-| Box mid-plane slice | 8 segments |
-| Cylinder generator/topology | 66 vertices, 192 edges, 128 faces |
-| Cylinder mid-plane slice | 64 segments |
-| Vertex, edge, and face picking | Pass |
-| Shared component movement | Pass |
-| Transform gizmo toggle | Pass |
-| Wireframe/shaded viewport cycle | Pass |
-| Keyboard and mouse orbit | Pass |
-| Click selection vs. drag orbit | Pass |
-| Layer navigation | Pass |
-| Alternating infill preview | Pass |
-| ASCII STL import | Pass |
-| G-code generation to `B:` | Pass, 58,708 bytes |
-
-The startup geometry test prevents the UI from launching if box/cylinder
-geometry, topology, bounds, or slice invariants fail.
-
-## Current limits
-
-- Basic painter-sorted flat shading; no z-buffer, materials, or lighting editor
-- ASCII STL only
-- Maximum 768 triangles and 1,536 slice segments
-- Orthographic projection only
-- One object at a time
-- One active component selection at a time
-- Translation only; the gizmo does not rotate or scale geometry yet
-- No undo/redo, saveable scene format, extrusion, or topology creation tools
-- Infill is previewed but not included in exported G-code
-- Live-CD exports are temporary
-
-## Best next upgrades
-
-1. Make the gizmo interactive with mouse-axis dragging.
-2. Add rotate and scale transforms for selected vertices/edges/faces.
-3. Add box select, multi-select, delete, and undo/redo.
-4. Extrude selected faces and split/subdivide selected edges.
-5. Add object mode, a small scene/outliner, and per-object transforms.
-6. Add perspective projection and a depth buffer.
-7. Add a saveable HolyCAD scene format plus OBJ/binary STL import and export.
-8. Add face normals, smooth/flat shading, and backface display options.
-9. Chain slice segments into contours and export multi-wall clipped infill.
-10. Build a host bridge for moving models and G-code in and out of the VM.
-
-The most valuable modeling milestone is face extrusion plus undo. The most
-valuable slicer milestone remains contour chaining with multi-wall and infill
-export.
+| `HolyCAD.HC` | HolyC source |
+| `DATA/HolyGem.STL` | Bundled ASCII STL demo model |
+| `HolyCADShare.img.gz` | Compressed TempleOS share disk |
+| `run.command` | macOS QEMU launcher |
+| `run.ps1` | Windows QEMU launcher |
+| `screenshots/` | Native TempleOS screenshots |
